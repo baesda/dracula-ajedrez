@@ -18,6 +18,11 @@ import type {
 import { DraculaTitleOverlay, type TwoPlayerStep } from './components/DraculaTitleOverlay';
 import { FallbackBoard2D } from './components/FallbackBoard2D';
 import { GameHud } from './components/GameHud';
+import {
+  createP2PHostRoom,
+  joinP2PGuestRoom,
+  type P2PSession,
+} from './multiplayer/p2pRoom';
 import { DraculaChessScene } from './three/DraculaChessScene';
 
 export default function App() {
@@ -68,6 +73,8 @@ export default function App() {
     bMs: 10 * 60_000,
   });
   const playerIdRef = useRef<string | null>(null);
+  const p2pSessionRef = useRef<P2PSession | null>(null);
+  const transportModeRef = useRef<'server' | 'p2p' | null>(null);
   const roomVersionRef = useRef<number>(0);
   const opponentJoinedNotifiedRef = useRef<boolean>(false);
 
@@ -121,6 +128,10 @@ export default function App() {
   }, [clockState, gameMode, snapshot.isGameOver]);
 
   const closeSocket = useCallback((notifyLeave = false) => {
+    if (p2pSessionRef.current) {
+      p2pSessionRef.current.close(notifyLeave);
+      p2pSessionRef.current = null;
+    }
     const code = stateRef.current.roomCode;
     const pid = playerIdRef.current;
     if (notifyLeave && code && pid) {
@@ -274,6 +285,17 @@ export default function App() {
       const engine = engineRef.current;
 
       if (mode === '2p') {
+        if (p2pSessionRef.current) {
+          setSelectedSquare(null);
+          setLegalMoves([]);
+          syncSceneNow(null, []);
+          p2pSessionRef.current.makeMove(from, to, promotion).then((res) => {
+            if (!res.ok) {
+              setStatusBanner(res.error || 'No se pudo enviar la jugada.');
+            }
+          });
+          return;
+        }
         const pid = playerIdRef.current;
         if (!code || !pid) {
           setStatusBanner('Conexión perdida con la sala.');
@@ -636,7 +658,7 @@ export default function App() {
 
   // Adaptive HTTP polling fallback guarantees 2-player sync even if WebSockets are blocked by a proxy
   useEffect(() => {
-    if (gameMode !== '2p' || !roomCode || !playerIdRef.current) return;
+    if (gameMode !== '2p' || !roomCode || !playerIdRef.current || p2pSessionRef.current) return;
     if (twoPlayerStep !== 'waiting' && screenState === 'title') return;
 
     let cancelled = false;
@@ -677,12 +699,61 @@ export default function App() {
     };
   }, [gameMode, roomCode, screenState, twoPlayerStep]);
 
+  const detectTransportMode = useCallback(async (): Promise<'server' | 'p2p'> => {
+    if (transportModeRef.current) return transportModeRef.current;
+    try {
+      const res = await fetch('/api/health', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        if (data?.mode === 'server') {
+          transportModeRef.current = 'server';
+          return 'server';
+        }
+      }
+    } catch {
+      // Static / serverless host without persistent room backend
+    }
+    transportModeRef.current = 'p2p';
+    return 'p2p';
+  }, []);
+
   const handleCreateRoom = useCallback(async () => {
     closeSocket(true);
     setWsError(null);
     setIsConnecting(true);
     setTwoPlayerStep('creating');
     setRoomCode(null);
+
+    const mode = await detectTransportMode();
+    if (mode === 'p2p') {
+      try {
+        const created = await createP2PHostRoom(timeControlMinutes, {
+          onUpdate: (update) => applyRoomUpdateRef.current(update),
+          onClockSync: (clock) => applyServerClock(clock),
+          onError: (message) => setStatusBanner(message),
+        });
+        p2pSessionRef.current = created.session;
+        roomVersionRef.current = created.version;
+        opponentJoinedNotifiedRef.current = false;
+
+        setIsConnecting(false);
+        setGameMode('2p');
+        setPlayerColor(created.color);
+        setRoomCode(created.code);
+        setTwoPlayerStep('waiting');
+        engineRef.current.loadFen(created.snapshot.fen);
+        setSnapshot(created.snapshot);
+        applyServerClock(created.clock);
+      } catch (err) {
+        setIsConnecting(false);
+        setWsError(
+          err instanceof Error
+            ? err.message
+            : 'No se pudo conectar con el servicio de partidas. Pulsa Reintentar.',
+        );
+      }
+      return;
+    }
 
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), 8000);
@@ -718,7 +789,13 @@ export default function App() {
     } finally {
       window.clearTimeout(timeoutId);
     }
-  }, [applyServerClock, attachRoomPushSocket, closeSocket, timeControlMinutes]);
+  }, [
+    applyServerClock,
+    attachRoomPushSocket,
+    closeSocket,
+    detectTransportMode,
+    timeControlMinutes,
+  ]);
 
   const handleJoinRoom = useCallback(
     async (rawCode: string) => {
@@ -726,6 +803,48 @@ export default function App() {
       closeSocket(true);
       setWsError(null);
       setIsConnecting(true);
+
+      const mode = await detectTransportMode();
+      if (mode === 'p2p') {
+        try {
+          const joined = await joinP2PGuestRoom(code, {
+            onUpdate: (update) => applyRoomUpdateRef.current(update),
+            onClockSync: (clock) => applyServerClock(clock),
+            onError: (message) => setStatusBanner(message),
+          });
+          p2pSessionRef.current = joined.session;
+          roomVersionRef.current = joined.version;
+          opponentJoinedNotifiedRef.current = true;
+
+          setIsConnecting(false);
+          setGameMode('2p');
+          setPlayerColor(joined.color);
+          setRoomCode(joined.code);
+          setTwoPlayerStep(null);
+          setStatusBanner(null);
+          engineRef.current.loadFen(joined.snapshot.fen);
+          setSnapshot(joined.snapshot);
+          applyServerClock(joined.clock);
+          setSelectedSquare(null);
+          setLegalMoves([]);
+          setScreenState('playing');
+          sceneRef.current?.setTitleMode(false, joined.color);
+          sceneRef.current?.syncState(
+            engineRef.current.getPieces(),
+            joined.snapshot,
+            null,
+            [],
+          );
+        } catch (err) {
+          setIsConnecting(false);
+          setWsError(
+            err instanceof Error
+              ? err.message
+              : 'No se pudo conectar con la partida en línea.',
+          );
+        }
+        return;
+      }
 
       const controller = new AbortController();
       const timeoutId = window.setTimeout(() => controller.abort(), 8000);
@@ -776,7 +895,7 @@ export default function App() {
         window.clearTimeout(timeoutId);
       }
     },
-    [applyServerClock, attachRoomPushSocket, closeSocket],
+    [applyServerClock, attachRoomPushSocket, closeSocket, detectTransportMode],
   );
 
   const handleToggleMute = useCallback(() => {
@@ -812,6 +931,10 @@ export default function App() {
   const handleResign = useCallback(() => {
     if (snapshot.isGameOver) return;
     sceneRef.current?.cancelCaptureAnimation();
+    if (gameMode === '2p' && p2pSessionRef.current) {
+      p2pSessionRef.current.resign();
+      return;
+    }
     if (gameMode === '2p' && roomCode && playerIdRef.current) {
       fetch(`/api/rooms/${encodeURIComponent(roomCode)}/resign`, {
         method: 'POST',
@@ -844,6 +967,10 @@ export default function App() {
 
   const handleRestart = useCallback(() => {
     sceneRef.current?.cancelCaptureAnimation();
+    if (gameMode === '2p' && p2pSessionRef.current) {
+      p2pSessionRef.current.rematch();
+      return;
+    }
     if (gameMode === '2p' && roomCode && playerIdRef.current) {
       fetch(`/api/rooms/${encodeURIComponent(roomCode)}/rematch`, {
         method: 'POST',

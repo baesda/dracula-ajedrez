@@ -417,7 +417,7 @@ async function startServer() {
   });
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, activeRooms: roomManager.getRoomCount() });
+    res.json({ ok: true, mode: 'server', activeRooms: roomManager.getRoomCount() });
   });
 
   if (process.env.NODE_ENV === 'production') {
