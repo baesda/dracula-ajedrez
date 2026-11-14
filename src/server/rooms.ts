@@ -25,6 +25,8 @@ export interface ChessRoom {
   bRemainingMs: number;
   activeTurn: TeamColor | null;
   turnStartedAtMs: number;
+  version: number;
+  opponentDisconnected: boolean;
 }
 
 const LOWERCASE_LETTERS = 'abcdefghijklmnopqrstuvwxyz';
@@ -96,6 +98,8 @@ export class RoomManager {
       bRemainingMs: initialMs,
       activeTurn: null, // Clock starts only once opponent joins
       turnStartedAtMs: now,
+      version: 1,
+      opponentDisconnected: false,
     };
     this.rooms.set(code, room);
     return {
@@ -150,6 +154,9 @@ export class RoomManager {
       room.activeTurn = room.engine.getTurn();
       room.turnStartedAtMs = now;
     }
+    if (firstJoin) {
+      room.version += 1;
+    }
 
     return {
       ok: true,
@@ -189,6 +196,7 @@ export class RoomManager {
       }
       room.engine.setTimeoutLoss(room.activeTurn);
       room.activeTurn = null;
+      room.version += 1;
       return {
         timedOut: true,
         snapshot: room.engine.getSnapshot(),
@@ -242,6 +250,7 @@ export class RoomManager {
       else room.bRemainingMs = 0;
       room.engine.setTimeoutLoss(playerColor);
       room.activeTurn = null;
+      room.version += 1;
       return {
         ok: true,
         timedOut: true,
@@ -273,6 +282,8 @@ export class RoomManager {
         : 0;
       room.turnStartedAtMs = now + captureDelayMs;
     }
+
+    room.version += 1;
 
     return {
       ok: true,
@@ -306,6 +317,7 @@ export class RoomManager {
     }
 
     room.engine.resign(playerColor);
+    room.version += 1;
     return {
       ok: true,
       snapshot: room.engine.getSnapshot(),
@@ -332,12 +344,66 @@ export class RoomManager {
     room.bRemainingMs = initialMs;
     room.activeTurn = room.guestId ? 'w' : null;
     room.turnStartedAtMs = now;
+    room.opponentDisconnected = false;
+    room.version += 1;
     return {
       ok: true,
       snapshot: room.engine.getSnapshot(),
       clock: this.getClockState(room, now),
       room,
     };
+  }
+
+  getRoomStateForPlayer(
+    rawCode: string,
+    playerId: string,
+  ):
+    | {
+        ok: true;
+        code: string;
+        color: TeamColor;
+        opponentConnected: boolean;
+        opponentDisconnected: boolean;
+        snapshot: GameSnapshot;
+        clock: ClockState;
+        version: number;
+      }
+    | { ok: false; error: string } {
+    const code = rawCode.trim().toLowerCase();
+    const room = this.rooms.get(code);
+    if (!room) {
+      return { ok: false, error: 'Partida no encontrada o finalizada.' };
+    }
+    const color: TeamColor | null =
+      playerId === room.hostId ? 'w' : playerId === room.guestId ? 'b' : null;
+    if (!color) {
+      return { ok: false, error: 'No perteneces a esta partida.' };
+    }
+
+    // Ensure timeout is evaluated on poll too
+    this.checkTimeout(code);
+
+    return {
+      ok: true,
+      code,
+      color,
+      opponentConnected: Boolean(room.guestId),
+      opponentDisconnected: room.opponentDisconnected,
+      snapshot: room.engine.getSnapshot(),
+      clock: this.getClockState(room),
+      version: room.version,
+    };
+  }
+
+  leaveRoom(
+    rawCode: string,
+    playerId: string,
+  ): { room: ChessRoom; remainingPlayerId: string | null; clock: ClockState } | null {
+    const code = rawCode.trim().toLowerCase();
+    const room = this.rooms.get(code);
+    if (!room) return null;
+    if (room.hostId !== playerId && room.guestId !== playerId) return null;
+    return this.handleDisconnect(playerId);
   }
 
   handleDisconnect(
@@ -360,9 +426,21 @@ export class RoomManager {
         if (remainingPlayerId && !room.engine.isGameOver()) {
           const winner: TeamColor = remainingPlayerId === room.hostId ? 'w' : 'b';
           room.engine.setOpponentLeft(winner);
+          room.opponentDisconnected = true;
         }
+        room.version += 1;
         const clock = this.getClockState(room, now);
-        this.rooms.delete(code);
+        if (!remainingPlayerId) {
+          this.rooms.delete(code);
+        } else {
+          // Keep room briefly so remaining HTTP-polling player receives final game_over state
+          setTimeout(() => {
+            const existing = this.rooms.get(code);
+            if (existing === room) {
+              this.rooms.delete(code);
+            }
+          }, 30_000).unref?.();
+        }
         return { room, remainingPlayerId, clock };
       }
     }

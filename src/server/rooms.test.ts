@@ -159,3 +159,45 @@ test('clock formatting never ticks early and compensates client-server clock off
   assert.equal(disp.wMs, 599_000);
   assert.equal(formatClockTime(disp.wMs), '09:59');
 });
+
+test('HTTP polling getRoomStateForPlayer bumps monotonic version and leaveRoom ends match cleanly', () => {
+  let fakeNow = 50_000;
+  const manager = new RoomManager(() => fakeNow);
+  const created = manager.createRoom('host-http', 30);
+
+  const s1 = manager.getRoomStateForPlayer(created.code, 'host-http');
+  assert.equal(s1.ok, true);
+  if (!s1.ok) return;
+  assert.equal(s1.version, 1);
+  assert.equal(s1.opponentConnected, false);
+
+  const joined = manager.joinRoom(created.code, 'guest-http');
+  assert.equal(joined.ok, true);
+  const s2 = manager.getRoomStateForPlayer(created.code, 'host-http');
+  assert.equal(s2.ok, true);
+  if (!s2.ok) return;
+  assert.equal(s2.version, 2);
+  assert.equal(s2.opponentConnected, true);
+
+  fakeNow += 2_000;
+  const mv = manager.makeMove(created.code, 'host-http', 'e2', 'e4');
+  assert.equal(mv.ok, true);
+  const s3 = manager.getRoomStateForPlayer(created.code, 'guest-http');
+  assert.equal(s3.ok, true);
+  if (!s3.ok) return;
+  assert.equal(s3.version, 3);
+  assert.equal(s3.snapshot.lastMove?.san, 'e4');
+
+  // Guest leaves -> host receives opponent_left and winner='w'
+  const left = manager.leaveRoom(created.code, 'guest-http');
+  assert.ok(left);
+  assert.equal(left.remainingPlayerId, 'host-http');
+  const s4 = manager.getRoomStateForPlayer(created.code, 'host-http');
+  assert.equal(s4.ok, true);
+  if (!s4.ok) return;
+  assert.equal(s4.snapshot.isGameOver, true);
+  assert.equal(s4.snapshot.reason, 'opponent_left');
+  assert.equal(s4.snapshot.winner, 'w');
+  assert.equal(s4.opponentDisconnected, true);
+});
+

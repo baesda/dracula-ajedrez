@@ -269,7 +269,20 @@ export function DraculaTitleOverlay({
                 <span>Cancelar sala</span>
               </button>
 
-              {twoPlayerStep === 'creating' || !roomCode ? (
+              {errorMessage ? (
+                <div className="space-y-3">
+                  <p role="alert" className="text-xs font-medium text-[#ff6b7d] bg-[#2c0b12] border border-[#8c1625] rounded-lg px-3 py-2.5">
+                    {errorMessage}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={onCreateRoom}
+                    className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-[#d61126] hover:bg-[#ef1830] text-white font-bold text-sm border border-[#ff6b7d]/50 transition-all cursor-pointer"
+                  >
+                    <span>Reintentar</span>
+                  </button>
+                </div>
+              ) : twoPlayerStep === 'creating' || !roomCode ? (
                 <div className="flex items-center gap-3 py-4 text-sm text-[#dfd1d3]">
                   <Loader2 className="w-5 h-5 animate-spin text-[#e61229]" />
                   <span>Creando sala en línea...</span>

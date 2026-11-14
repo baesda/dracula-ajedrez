@@ -6,7 +6,6 @@ import { computeDisplayClockMs } from './chess/clock';
 import { DraculaChessEngine } from './chess/engine';
 import type {
   AppScreenState,
-  ClientWsMessage,
   ClockState,
   GameMode,
   GameSnapshot,
@@ -17,6 +16,7 @@ import type {
   TimeControlMinutes,
 } from './chess/types';
 import { DraculaTitleOverlay, type TwoPlayerStep } from './components/DraculaTitleOverlay';
+import { FallbackBoard2D } from './components/FallbackBoard2D';
 import { GameHud } from './components/GameHud';
 import { DraculaChessScene } from './three/DraculaChessScene';
 
@@ -51,6 +51,8 @@ export default function App() {
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [isCaptureAnimating, setIsCaptureAnimating] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [webglUnavailable, setWebglUnavailable] = useState(false);
+  const [sceneRetryCount, setSceneRetryCount] = useState(0);
 
   // 2-Player Room & Clock State
   const [twoPlayerStep, setTwoPlayerStep] = useState<TwoPlayerStep | null>(null);
@@ -65,6 +67,9 @@ export default function App() {
     wMs: 10 * 60_000,
     bMs: 10 * 60_000,
   });
+  const playerIdRef = useRef<string | null>(null);
+  const roomVersionRef = useRef<number>(0);
+  const opponentJoinedNotifiedRef = useRef<boolean>(false);
 
   // Mutable refs for event handlers so Three.js scene never remounts
   const stateRef = useRef({
@@ -115,9 +120,23 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [clockState, gameMode, snapshot.isGameOver]);
 
-  const closeSocket = useCallback(() => {
+  const closeSocket = useCallback((notifyLeave = false) => {
+    const code = stateRef.current.roomCode;
+    const pid = playerIdRef.current;
+    if (notifyLeave && code && pid) {
+      fetch(`/api/rooms/${encodeURIComponent(code)}/leave`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playerId: pid }),
+        keepalive: true,
+      }).catch(() => {});
+    }
+    playerIdRef.current = null;
+    roomVersionRef.current = 0;
+    opponentJoinedNotifiedRef.current = false;
     if (wsRef.current) {
       wsRef.current.onclose = null;
+      wsRef.current.onerror = null;
       wsRef.current.close();
       wsRef.current = null;
     }
@@ -255,21 +274,35 @@ export default function App() {
       const engine = engineRef.current;
 
       if (mode === '2p') {
-        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !code) {
+        const pid = playerIdRef.current;
+        if (!code || !pid) {
           setStatusBanner('Conexión perdida con la sala.');
           return;
         }
-        const payload: ClientWsMessage = {
-          type: 'make_move',
-          code,
-          from,
-          to,
-          promotion,
-        };
-        wsRef.current.send(JSON.stringify(payload));
         setSelectedSquare(null);
         setLegalMoves([]);
         syncSceneNow(null, []);
+        fetch(`/api/rooms/${encodeURIComponent(code)}/move`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ playerId: pid, from, to, promotion }),
+        })
+          .then(async (res) => {
+            const data = await res.json();
+            if (!res.ok) {
+              setStatusBanner(data.error || 'No se pudo enviar la jugada.');
+              return;
+            }
+            applyRoomUpdateRef.current({
+              snapshot: data.snapshot,
+              clock: data.clock,
+              version: data.version,
+              opponentConnected: true,
+            });
+          })
+          .catch(() => {
+            setStatusBanner('Error de red al enviar la jugada.');
+          });
         return;
       }
 
@@ -387,31 +420,42 @@ export default function App() {
     const container = mountRef.current;
     if (!container) return;
 
-    const scene = new DraculaChessScene(container, {
-      onSquareClick: (sq) => handleSquareClickRef.current(sq),
-      onCaptureStateChange: (capturing) => handleCaptureStateChangeRef.current(capturing),
-    });
-    sceneRef.current = scene;
-    scene.syncState(
-      engineRef.current.getPieces(),
-      engineRef.current.getSnapshot(),
-      null,
-      [],
-    );
-    scene.setTitleMode(!autostart, 'w');
+    let scene: DraculaChessScene | null = null;
+    try {
+      scene = new DraculaChessScene(container, {
+        onSquareClick: (sq) => handleSquareClickRef.current(sq),
+        onCaptureStateChange: (capturing) => handleCaptureStateChangeRef.current(capturing),
+        onContextLost: () => {
+          setWebglUnavailable(true);
+        },
+      });
+      sceneRef.current = scene;
+      setWebglUnavailable(false);
+      scene.syncState(
+        engineRef.current.getPieces(),
+        engineRef.current.getSnapshot(),
+        null,
+        [],
+      );
+      scene.setTitleMode(stateRef.current.screenState === 'title', stateRef.current.playerColor);
+    } catch (err) {
+      console.error('Error al iniciar escena 3D WebGL:', err);
+      sceneRef.current = null;
+      setWebglUnavailable(true);
+    }
 
     return () => {
       clearAiTimer();
       closeSocket();
-      scene.dispose();
+      scene?.dispose();
       sceneRef.current = null;
     };
-  }, [autostart, clearAiTimer, closeSocket]);
+  }, [autostart, clearAiTimer, closeSocket, sceneRetryCount]);
 
   const startSinglePlayer = useCallback(
     (resolvedElo?: number) => {
       clearAiTimer();
-      closeSocket();
+      closeSocket(true);
       sceneRef.current?.cancelCaptureAnimation();
       (document.activeElement as HTMLElement | null)?.blur?.();
 
@@ -442,158 +486,297 @@ export default function App() {
     [clearAiTimer, closeSocket],
   );
 
-  const connectWebSocket = useCallback(
-    (onOpenMsg: ClientWsMessage) => {
-      closeSocket();
+  const applyRoomUpdate = useCallback(
+    (payload: {
+      snapshot: GameSnapshot;
+      clock: ClockState;
+      version?: number;
+      opponentConnected?: boolean;
+      opponentDisconnected?: boolean;
+    }) => {
+      if (
+        typeof payload.version === 'number' &&
+        payload.version <= roomVersionRef.current
+      ) {
+        return;
+      }
+      if (typeof payload.version === 'number') {
+        roomVersionRef.current = payload.version;
+      }
+
+      if (payload.opponentConnected && !opponentJoinedNotifiedRef.current) {
+        opponentJoinedNotifiedRef.current = true;
+        setTwoPlayerStep(null);
+        setStatusBanner(null);
+        engineRef.current.loadFen(payload.snapshot.fen);
+        setSnapshot(payload.snapshot);
+        applyServerClock(payload.clock);
+        setSelectedSquare(null);
+        setLegalMoves([]);
+        setScreenState('playing');
+        sceneRef.current?.setTitleMode(false, stateRef.current.playerColor);
+        sceneRef.current?.syncState(
+          engineRef.current.getPieces(),
+          payload.snapshot,
+          null,
+          [],
+        );
+        draculaAudio.playSelect();
+        return;
+      }
+
+      const prevCount = engineRef.current.getPieces().length;
+      const prevFen = engineRef.current.getFen();
+      engineRef.current.loadFen(payload.snapshot.fen);
+      const nextCount = engineRef.current.getPieces().length;
+      const fenChanged = prevFen !== payload.snapshot.fen;
+      const wasCapture =
+        fenChanged && payload.snapshot.reason !== 'timeout' && nextCount < prevCount;
+      const wasCastle =
+        fenChanged && Boolean(payload.snapshot.lastMove?.san.startsWith('O-'));
+
+      setSnapshot(payload.snapshot);
+      applyServerClock(payload.clock);
+      setSelectedSquare(null);
+      setLegalMoves([]);
+      setPendingPromotion(null);
+      if (payload.opponentDisconnected) {
+        setStatusBanner('El oponente se desconectó de la sala.');
+      } else {
+        setStatusBanner(null);
+      }
+
+      if (payload.snapshot.reason === 'timeout' || payload.snapshot.reason === 'opponent_left') {
+        sceneRef.current?.cancelCaptureAnimation();
+      }
+      sceneRef.current?.syncState(
+        engineRef.current.getPieces(),
+        payload.snapshot,
+        null,
+        [],
+      );
+      if (fenChanged) {
+        playSoundForMove(
+          payload.snapshot,
+          wasCapture,
+          wasCastle,
+          payload.snapshot.history[payload.snapshot.history.length - 1]?.piece,
+        );
+      }
+
+      if (payload.snapshot.isGameOver && !wasCapture) {
+        if (
+          payload.snapshot.reason === 'timeout' ||
+          payload.snapshot.reason === 'resignation' ||
+          payload.snapshot.reason === 'opponent_left'
+        ) {
+          draculaAudio.playGameOver(payload.snapshot.winner === stateRef.current.playerColor);
+        }
+        setScreenState('gameover');
+      } else if (!payload.snapshot.isGameOver && opponentJoinedNotifiedRef.current) {
+        setScreenState('playing');
+      }
+    },
+    [applyServerClock, playSoundForMove],
+  );
+
+  const applyRoomUpdateRef = useRef(applyRoomUpdate);
+  applyRoomUpdateRef.current = applyRoomUpdate;
+
+  const attachRoomPushSocket = useCallback(
+    (playerId: string) => {
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.onerror = null;
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      try {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(
+          `${protocol}//${window.location.host}/ws?playerId=${encodeURIComponent(playerId)}`,
+        );
+        wsRef.current = ws;
+
+        ws.onmessage = (event) => {
+          let msg: ServerWsMessage;
+          try {
+            msg = JSON.parse(event.data) as ServerWsMessage;
+          } catch {
+            return;
+          }
+          if (msg.type === 'opponent_joined') {
+            applyRoomUpdateRef.current({
+              snapshot: msg.snapshot,
+              clock: msg.clock,
+              version: msg.version,
+              opponentConnected: true,
+            });
+          } else if (msg.type === 'state_update' || msg.type === 'game_over') {
+            applyRoomUpdateRef.current({
+              snapshot: msg.snapshot,
+              clock: msg.clock,
+              version: msg.version,
+              opponentConnected: true,
+            });
+          } else if (msg.type === 'opponent_disconnected') {
+            setStatusBanner('El oponente se desconectó de la sala.');
+          }
+        };
+
+        ws.onerror = () => {
+          // Silent fallback: HTTP polling keeps the 2-player match synced smoothly
+        };
+      } catch {
+        // Ignore WS failure; HTTP polling handles synchronization
+      }
+    },
+    [],
+  );
+
+  // Adaptive HTTP polling fallback guarantees 2-player sync even if WebSockets are blocked by a proxy
+  useEffect(() => {
+    if (gameMode !== '2p' || !roomCode || !playerIdRef.current) return;
+    if (twoPlayerStep !== 'waiting' && screenState === 'title') return;
+
+    let cancelled = false;
+    let timerId: number | null = null;
+
+    const poll = async () => {
+      const pid = playerIdRef.current;
+      if (cancelled || !pid || !roomCode) return;
+      try {
+        const res = await fetch(
+          `/api/rooms/${encodeURIComponent(roomCode)}/state?playerId=${encodeURIComponent(pid)}`,
+        );
+        if (res.ok && !cancelled) {
+          const data = await res.json();
+          applyRoomUpdateRef.current({
+            snapshot: data.snapshot,
+            clock: data.clock,
+            version: data.version,
+            opponentConnected: data.opponentConnected,
+            opponentDisconnected: data.opponentDisconnected,
+          });
+        }
+      } catch {
+        // Ignore transient network poll glitch and retry
+      } finally {
+        if (!cancelled) {
+          const wsOpen = wsRef.current?.readyState === WebSocket.OPEN;
+          const delay = wsOpen ? 1400 : twoPlayerStep === 'waiting' ? 350 : 420;
+          timerId = window.setTimeout(poll, delay);
+        }
+      }
+    };
+
+    timerId = window.setTimeout(poll, 280);
+    return () => {
+      cancelled = true;
+      if (timerId !== null) window.clearTimeout(timerId);
+    };
+  }, [gameMode, roomCode, screenState, twoPlayerStep]);
+
+  const handleCreateRoom = useCallback(async () => {
+    closeSocket(true);
+    setWsError(null);
+    setIsConnecting(true);
+    setTwoPlayerStep('creating');
+    setRoomCode(null);
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 8000);
+
+    try {
+      const res = await fetch('/api/rooms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timeControlMinutes }),
+        signal: controller.signal,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.code || !data.playerId) {
+        throw new Error(data.error || 'No se pudo crear la sala en línea.');
+      }
+
+      playerIdRef.current = data.playerId;
+      roomVersionRef.current = data.version ?? 1;
+      opponentJoinedNotifiedRef.current = false;
+
+      setIsConnecting(false);
+      setGameMode('2p');
+      setPlayerColor(data.color ?? 'w');
+      setRoomCode(data.code);
+      setTwoPlayerStep('waiting');
+      engineRef.current.loadFen(data.snapshot.fen);
+      setSnapshot(data.snapshot);
+      applyServerClock(data.clock);
+      attachRoomPushSocket(data.playerId);
+    } catch {
+      setIsConnecting(false);
+      setWsError('No se pudo conectar con el servidor de partidas. Pulsa Reintentar.');
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  }, [applyServerClock, attachRoomPushSocket, closeSocket, timeControlMinutes]);
+
+  const handleJoinRoom = useCallback(
+    async (rawCode: string) => {
+      const code = rawCode.trim().toLowerCase();
+      closeSocket(true);
       setWsError(null);
       setIsConnecting(true);
 
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-      wsRef.current = ws;
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 8000);
 
-      ws.onopen = () => {
-        ws.send(JSON.stringify(onOpenMsg));
-      };
-
-      ws.onmessage = (event) => {
-        let msg: ServerWsMessage;
-        try {
-          msg = JSON.parse(event.data) as ServerWsMessage;
-        } catch {
-          return;
+      try {
+        const res = await fetch(`/api/rooms/${encodeURIComponent(code)}/join`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.playerId) {
+          throw new Error(data.error || 'No se pudo unir a la partida.');
         }
 
-        if (msg.type === 'error') {
-          setIsConnecting(false);
-          setWsError(msg.message);
-          setStatusBanner(msg.message);
-          return;
-        }
+        playerIdRef.current = data.playerId;
+        roomVersionRef.current = data.version ?? 2;
+        opponentJoinedNotifiedRef.current = true;
 
-        if (msg.type === 'room_created') {
-          setIsConnecting(false);
-          setGameMode('2p');
-          setPlayerColor(msg.color);
-          setRoomCode(msg.code);
-          setTwoPlayerStep('waiting');
-          engineRef.current.loadFen(msg.snapshot.fen);
-          setSnapshot(msg.snapshot);
-          applyServerClock(msg.clock);
-          return;
-        }
-
-        if (msg.type === 'room_joined') {
-          setIsConnecting(false);
-          setGameMode('2p');
-          setPlayerColor(msg.color);
-          setRoomCode(msg.code);
-          setTwoPlayerStep(null);
-          setStatusBanner(null);
-          engineRef.current.loadFen(msg.snapshot.fen);
-          setSnapshot(msg.snapshot);
-          applyServerClock(msg.clock);
-          setSelectedSquare(null);
-          setLegalMoves([]);
-          setScreenState('playing');
-          sceneRef.current?.setTitleMode(false, msg.color);
-          sceneRef.current?.syncState(
-            engineRef.current.getPieces(),
-            msg.snapshot,
-            null,
-            [],
-          );
-          return;
-        }
-
-        if (msg.type === 'opponent_joined') {
-          setTwoPlayerStep(null);
-          setStatusBanner(null);
-          engineRef.current.loadFen(msg.snapshot.fen);
-          setSnapshot(msg.snapshot);
-          applyServerClock(msg.clock);
-          setSelectedSquare(null);
-          setLegalMoves([]);
-          setScreenState('playing');
-          sceneRef.current?.setTitleMode(false, 'w');
-          sceneRef.current?.syncState(
-            engineRef.current.getPieces(),
-            msg.snapshot,
-            null,
-            [],
-          );
-          draculaAudio.playSelect();
-          return;
-        }
-
-        if (msg.type === 'state_update' || msg.type === 'game_over') {
-          const prevCount = engineRef.current.getPieces().length;
-          engineRef.current.loadFen(msg.snapshot.fen);
-          const nextCount = engineRef.current.getPieces().length;
-          const wasCapture = msg.snapshot.reason !== 'timeout' && nextCount < prevCount;
-          const wasCastle = Boolean(msg.snapshot.lastMove?.san.startsWith('O-'));
-
-          setSnapshot(msg.snapshot);
-          applyServerClock(msg.clock);
-          setSelectedSquare(null);
-          setLegalMoves([]);
-          setPendingPromotion(null);
-          setStatusBanner(null);
-          if (msg.snapshot.reason === 'timeout') {
-            sceneRef.current?.cancelCaptureAnimation();
-          }
-          sceneRef.current?.syncState(
-            engineRef.current.getPieces(),
-            msg.snapshot,
-            null,
-            [],
-          );
-          playSoundForMove(
-            msg.snapshot,
-            wasCapture,
-            wasCastle,
-            msg.snapshot.history[msg.snapshot.history.length - 1]?.piece,
-          );
-
-          if ((msg.type === 'game_over' || msg.snapshot.isGameOver) && !wasCapture) {
-            if (msg.snapshot.reason === 'timeout') {
-              draculaAudio.playGameOver(msg.snapshot.winner === stateRef.current.playerColor);
-            }
-            setScreenState('gameover');
-          } else if (!msg.snapshot.isGameOver) {
-            setScreenState('playing');
-          }
-          return;
-        }
-
-        if (msg.type === 'opponent_disconnected') {
-          setStatusBanner('El oponente se desconectó de la sala.');
-        }
-      };
-
-      ws.onerror = () => {
         setIsConnecting(false);
-        setWsError('No se pudo conectar con el servidor de partidas.');
-      };
-
-      ws.onclose = () => {
+        setGameMode('2p');
+        setPlayerColor(data.color ?? 'b');
+        setRoomCode(data.code);
+        setTwoPlayerStep(null);
+        setStatusBanner(null);
+        engineRef.current.loadFen(data.snapshot.fen);
+        setSnapshot(data.snapshot);
+        applyServerClock(data.clock);
+        setSelectedSquare(null);
+        setLegalMoves([]);
+        setScreenState('playing');
+        sceneRef.current?.setTitleMode(false, data.color ?? 'b');
+        sceneRef.current?.syncState(
+          engineRef.current.getPieces(),
+          data.snapshot,
+          null,
+          [],
+        );
+        attachRoomPushSocket(data.playerId);
+      } catch (err) {
         setIsConnecting(false);
-      };
+        setWsError(
+          err instanceof Error && err.name !== 'AbortError'
+            ? err.message
+            : 'No se pudo conectar con el servidor de partidas.',
+        );
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
     },
-    [applyServerClock, closeSocket, playSoundForMove],
-  );
-
-  const handleCreateRoom = useCallback(() => {
-    setTwoPlayerStep('creating');
-    setRoomCode(null);
-    connectWebSocket({ type: 'create_room', timeControlMinutes });
-  }, [connectWebSocket, timeControlMinutes]);
-
-  const handleJoinRoom = useCallback(
-    (code: string) => {
-      connectWebSocket({ type: 'join_room', code });
-    },
-    [connectWebSocket],
+    [applyServerClock, attachRoomPushSocket, closeSocket],
   );
 
   const handleToggleMute = useCallback(() => {
@@ -629,9 +812,24 @@ export default function App() {
   const handleResign = useCallback(() => {
     if (snapshot.isGameOver) return;
     sceneRef.current?.cancelCaptureAnimation();
-    if (gameMode === '2p' && wsRef.current?.readyState === WebSocket.OPEN && roomCode) {
-      const msg: ClientWsMessage = { type: 'resign', code: roomCode };
-      wsRef.current.send(JSON.stringify(msg));
+    if (gameMode === '2p' && roomCode && playerIdRef.current) {
+      fetch(`/api/rooms/${encodeURIComponent(roomCode)}/resign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playerId: playerIdRef.current }),
+      })
+        .then(async (res) => {
+          const data = await res.json();
+          if (res.ok) {
+            applyRoomUpdateRef.current({
+              snapshot: data.snapshot,
+              clock: data.clock,
+              version: data.version,
+              opponentConnected: true,
+            });
+          }
+        })
+        .catch(() => {});
       return;
     }
     engineRef.current.resign(playerColor);
@@ -646,9 +844,24 @@ export default function App() {
 
   const handleRestart = useCallback(() => {
     sceneRef.current?.cancelCaptureAnimation();
-    if (gameMode === '2p' && wsRef.current?.readyState === WebSocket.OPEN && roomCode) {
-      const msg: ClientWsMessage = { type: 'request_rematch', code: roomCode };
-      wsRef.current.send(JSON.stringify(msg));
+    if (gameMode === '2p' && roomCode && playerIdRef.current) {
+      fetch(`/api/rooms/${encodeURIComponent(roomCode)}/rematch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playerId: playerIdRef.current }),
+      })
+        .then(async (res) => {
+          const data = await res.json();
+          if (res.ok) {
+            applyRoomUpdateRef.current({
+              snapshot: data.snapshot,
+              clock: data.clock,
+              version: data.version,
+              opponentConnected: true,
+            });
+          }
+        })
+        .catch(() => {});
       return;
     }
     startSinglePlayer();
@@ -656,7 +869,7 @@ export default function App() {
 
   const handleReturnToTitle = useCallback(() => {
     clearAiTimer();
-    closeSocket();
+    closeSocket(true);
     sceneRef.current?.cancelCaptureAnimation();
     engineRef.current.reset();
     const snap = engineRef.current.getSnapshot();
@@ -714,7 +927,22 @@ export default function App() {
 
   return (
     <main className="relative w-screen h-screen overflow-hidden bg-[#090608]">
-      <div ref={mountRef} className="fixed inset-0 z-0" />
+      <div
+        ref={mountRef}
+        className="fixed inset-0 z-0 bg-[radial-gradient(circle_at_50%_42%,#24070e_0%,#0c0609_60%,#050304_100%)]"
+      />
+
+      {webglUnavailable && screenState !== 'title' && (
+        <FallbackBoard2D
+          pieces={engineRef.current.getPieces()}
+          playerColor={playerColor}
+          selectedSquare={selectedSquare}
+          legalMoves={legalMoves}
+          lastMove={snapshot.lastMove}
+          onSquareClick={handleSquareClick}
+          onRetryWebGL={() => setSceneRetryCount((c) => c + 1)}
+        />
+      )}
 
       {screenState === 'title' && (
         <DraculaTitleOverlay
@@ -729,7 +957,7 @@ export default function App() {
             setTwoPlayerStep('choose');
           }}
           onBackToMain={() => {
-            closeSocket();
+            closeSocket(true);
             setTwoPlayerStep(null);
             setRoomCode(null);
             setClockState(null);

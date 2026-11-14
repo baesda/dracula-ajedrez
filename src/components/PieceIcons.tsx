@@ -9,8 +9,8 @@ export function PieceMiniIcon({
   color: TeamColor;
   size?: number;
 }) {
-  const fill = color === 'w' ? '#e61229' : '#1b1821';
-  const stroke = color === 'w' ? '#ff7a88' : '#d61126';
+  const fill = color === 'w' ? '#e61229' : '#0f2419';
+  const stroke = color === 'w' ? '#ff8a98' : '#23d97b';
 
   return (
     <svg

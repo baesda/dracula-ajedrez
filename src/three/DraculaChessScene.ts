@@ -96,24 +96,38 @@ function shortestAngleLerp(current: number, target: number, alpha: number): numb
   return current + diff * alpha;
 }
 
-function detectSoftwareWebGL(): boolean {
+function isSoftwareRendererContext(gl: WebGLRenderingContext | WebGL2RenderingContext): boolean {
   try {
-    const probeCanvas = document.createElement('canvas');
-    const gl = probeCanvas.getContext('webgl2') || probeCanvas.getContext('webgl');
-    if (!gl) return true;
     const ext = gl.getExtension('WEBGL_debug_renderer_info');
     const param = ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER;
     const gpu = String(gl.getParameter(param) || '');
-    gl.getExtension('WEBGL_lose_context')?.loseContext();
     return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
   } catch {
-    return true;
+    return false;
   }
+}
+
+function createSafeWebGLRenderer(): THREE.WebGLRenderer {
+  const attempts: THREE.WebGLRendererParameters[] = [
+    { antialias: true, powerPreference: 'high-performance' },
+    { antialias: false, powerPreference: 'default' },
+    { antialias: false, failIfMajorPerformanceCaveat: false },
+  ];
+  let lastErr: unknown;
+  for (const opts of attempts) {
+    try {
+      return new THREE.WebGLRenderer(opts);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('No se pudo inicializar WebGL.');
 }
 
 export interface DraculaSceneCallbacks {
   onSquareClick: (square: string) => void;
   onCaptureStateChange?: (capturing: boolean) => void;
+  onContextLost?: () => void;
 }
 
 export class DraculaChessScene {
@@ -190,19 +204,17 @@ export class DraculaChessScene {
   constructor(container: HTMLElement, callbacks: DraculaSceneCallbacks) {
     this.container = container;
     this.callbacks = callbacks;
-    this.isSoftwareGl = detectSoftwareWebGL();
 
     const width = Math.max(container.clientWidth, 320);
     const height = Math.max(container.clientHeight, 240);
 
-    this.renderer = new THREE.WebGLRenderer({
-      antialias: !this.isSoftwareGl,
-      powerPreference: 'high-performance',
-    });
+    this.renderer = createSafeWebGLRenderer();
+    this.isSoftwareGl = isSoftwareRendererContext(this.renderer.getContext());
+
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 0.92;
-    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.setSize(width, height);
     this.renderer.shadowMap.enabled = !this.isSoftwareGl;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -211,6 +223,16 @@ export class DraculaChessScene {
     this.renderer.domElement.style.height = '100%';
     this.renderer.domElement.style.touchAction = 'none';
     this.renderer.domElement.dataset.testid = 'chess-canvas';
+
+    const onContextLost = (e: Event) => {
+      e.preventDefault();
+      this.callbacks.onContextLost?.();
+    };
+    this.renderer.domElement.addEventListener('webglcontextlost', onContextLost);
+    this.extraDisposables.push({
+      dispose: () => this.renderer.domElement.removeEventListener('webglcontextlost', onContextLost),
+    });
+
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
@@ -220,14 +242,18 @@ export class DraculaChessScene {
     this.camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 100);
     this.camera.position.set(6.5, 7.6, 8.2);
 
-    const pmrem = new THREE.PMREMGenerator(this.renderer);
-    const roomEnv = new RoomEnvironment();
-    const envTex = pmrem.fromScene(roomEnv, 0.04).texture;
-    this.scene.environment = envTex;
-    this.scene.environmentIntensity = 0.36;
-    this.extraDisposables.push(envTex);
-    roomEnv.dispose();
-    pmrem.dispose();
+    try {
+      const pmrem = new THREE.PMREMGenerator(this.renderer);
+      const roomEnv = new RoomEnvironment();
+      const envTex = pmrem.fromScene(roomEnv, 0.04).texture;
+      this.scene.environment = envTex;
+      this.scene.environmentIntensity = 0.36;
+      this.extraDisposables.push(envTex);
+      roomEnv.dispose();
+      pmrem.dispose();
+    } catch {
+      // Skip PMREM environment map on constrained WebGL drivers
+    }
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.target.set(0, 0.35, 0);
@@ -336,7 +362,11 @@ export class DraculaChessScene {
     this.scene.add(this.sparkMesh);
 
     if (!this.isSoftwareGl) {
-      this.renderer.compile(this.scene, this.camera);
+      try {
+        this.renderer.compile(this.scene, this.camera);
+      } catch {
+        // Non-fatal: shader compilation will proceed lazily on first render
+      }
     }
 
     this.bindInputEvents();

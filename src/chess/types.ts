@@ -90,6 +90,7 @@ export type ServerWsMessage =
       color: TeamColor;
       snapshot: GameSnapshot;
       clock: ClockState;
+      version?: number;
     }
   | {
       type: 'room_joined';
@@ -98,9 +99,28 @@ export type ServerWsMessage =
       opponentConnected: boolean;
       snapshot: GameSnapshot;
       clock: ClockState;
+      version?: number;
     }
-  | { type: 'opponent_joined'; code: string; snapshot: GameSnapshot; clock: ClockState }
-  | { type: 'state_update'; code: string; snapshot: GameSnapshot; clock: ClockState }
-  | { type: 'game_over'; code: string; snapshot: GameSnapshot; clock: ClockState }
+  | {
+      type: 'opponent_joined';
+      code: string;
+      snapshot: GameSnapshot;
+      clock: ClockState;
+      version?: number;
+    }
+  | {
+      type: 'state_update';
+      code: string;
+      snapshot: GameSnapshot;
+      clock: ClockState;
+      version?: number;
+    }
+  | {
+      type: 'game_over';
+      code: string;
+      snapshot: GameSnapshot;
+      clock: ClockState;
+      version?: number;
+    }
   | { type: 'opponent_disconnected'; code: string }
   | { type: 'error'; message: string };
