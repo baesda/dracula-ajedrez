@@ -1,0 +1,6 @@
+{
+  "name": "Drácula Ajedrez 3D",
+  "description": "Ajedrez 3D estilo Pixar de terror gótico con temática Drácula, tablero y piezas en rojo vivo y negro, modo 1 jugador contra IA y 2 jugadores en línea con código de 5 letras.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
