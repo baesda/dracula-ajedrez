@@ -329,6 +329,7 @@ export interface PieceRig {
   pawnUpperHeadPivot?: THREE.Group;
   pawnLowerJawPivot?: THREE.Group;
   pawnMawMesh?: THREE.Mesh;
+  pawnMouthAnchor?: THREE.Object3D;
   pawnLeftArmPivot?: THREE.Group;
   pawnRightArmPivot?: THREE.Group;
   // Bishop: raised crucifix staff + bleeding tip anchor
@@ -556,6 +557,12 @@ export function buildDraculaPieceMesh(
       upperHeadPivot.add(fang);
     });
 
+    // Upper mouth roof (palate) visible in vivid red whenever head tilts back
+    const upperPalate = new THREE.Mesh(geos.sculptedJaw, mats.mawInnerMat);
+    upperPalate.position.set(0, -0.008, 0.072);
+    upperPalate.scale.set(0.76, 0.34, 0.84);
+    upperHeadPivot.add(upperPalate);
+
     const tuft = shadow(new THREE.Mesh(geos.sculptedCranium, hornMat));
     tuft.position.set(-0.02, 0.17, -0.04);
     tuft.scale.set(0.68, 0.34, 0.72);
@@ -567,14 +574,19 @@ export function buildDraculaPieceMesh(
     scar.rotation.z = 0.28;
     upperHeadPivot.add(scar);
 
-    // Gaping bloody inner maw (hidden at scale 0.01 until pawn opens enormous mouth)
+    // Gaping bloody inner maw (hidden at scale 0.001 until pawn opens enormous mouth)
     const mawMesh = new THREE.Mesh(geos.sculptedCranium, mats.mawInnerMat);
-    mawMesh.position.set(0, 0.61, 0.08);
+    mawMesh.position.set(0, 0.6, 0.095);
     mawMesh.scale.setScalar(0.001);
     visualGroup.add(mawMesh);
     rig.pawnMawMesh = mawMesh;
 
-    // Hinged lower jaw with sharp jagged lower teeth
+    const mouthAnchor = new THREE.Object3D();
+    mouthAnchor.position.set(0, 0.61, 0.22);
+    visualGroup.add(mouthAnchor);
+    rig.pawnMouthAnchor = mouthAnchor;
+
+    // Hinged lower jaw with sharp jagged lower teeth + vivid red inner floor/tongue
     const lowerJawPivot = new THREE.Group();
     lowerJawPivot.position.set(0, 0.57, 0.03);
     visualGroup.add(lowerJawPivot);
@@ -584,6 +596,11 @@ export function buildDraculaPieceMesh(
     jaw.position.set(0, -0.02, 0.06);
     jaw.scale.set(0.78, 0.78, 0.92);
     lowerJawPivot.add(jaw);
+
+    const lowerInnerMouth = new THREE.Mesh(geos.sculptedJaw, mats.mawInnerMat);
+    lowerInnerMouth.position.set(0, 0.016, 0.068);
+    lowerInnerMouth.scale.set(0.66, 0.36, 0.8);
+    lowerJawPivot.add(lowerInnerMouth);
 
     [-1, 0, 1].forEach((slot) => {
       const lowerTooth = new THREE.Mesh(geos.fangCone, mats.boneMat);

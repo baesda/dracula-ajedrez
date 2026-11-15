@@ -66,39 +66,42 @@ export function createDraculaMaterials(textures: BoardTextures): DraculaMaterial
   const redSquareMat = new THREE.MeshPhysicalMaterial({
     color: 0xffffff,
     map: textures.redSquareMap,
-    bumpMap: textures.stoneBumpMap,
-    bumpScale: 0.01,
-    roughness: 0.24,
-    metalness: 0.08,
-    clearcoat: 0.72,
-    clearcoatRoughness: 0.14,
+    roughness: 0.95,
+    metalness: 0.0,
+    clearcoat: 0.0,
+    clearcoatRoughness: 1.0,
+    specularIntensity: 0.0,
+    envMapIntensity: 0.12,
   });
 
   const greenSquareMat = new THREE.MeshPhysicalMaterial({
     color: 0xffffff,
     map: textures.greenSquareMap,
-    bumpMap: textures.stoneBumpMap,
-    bumpScale: 0.01,
-    roughness: 0.26,
-    metalness: 0.08,
-    clearcoat: 0.7,
-    clearcoatRoughness: 0.16,
+    roughness: 0.95,
+    metalness: 0.0,
+    clearcoat: 0.0,
+    clearcoatRoughness: 1.0,
+    specularIntensity: 0.0,
+    envMapIntensity: 0.12,
   });
 
   const frameObsidianMat = new THREE.MeshStandardMaterial({
     color: 0x08060a,
     bumpMap: textures.stoneBumpMap,
-    bumpScale: 0.028,
-    roughness: 0.62,
-    metalness: 0.38,
+    bumpScale: 0.008,
+    roughness: 0.88,
+    metalness: 0.12,
+    envMapIntensity: 0.15,
   });
 
   const frameRubyTrimMat = new THREE.MeshPhysicalMaterial({
     color: 0xa80516,
-    roughness: 0.24,
-    metalness: 0.28,
-    clearcoat: 0.8,
-    clearcoatRoughness: 0.12,
+    roughness: 0.68,
+    metalness: 0.1,
+    clearcoat: 0.0,
+    clearcoatRoughness: 1.0,
+    specularIntensity: 0.08,
+    envMapIntensity: 0.15,
     emissive: 0x450008,
     emissiveIntensity: 0.65,
   });
@@ -106,9 +109,10 @@ export function createDraculaMaterials(textures: BoardTextures): DraculaMaterial
   const tableCryptMat = new THREE.MeshStandardMaterial({
     color: 0x050406,
     bumpMap: textures.stoneBumpMap,
-    bumpScale: 0.03,
-    roughness: 0.92,
-    metalness: 0.08,
+    bumpScale: 0.008,
+    roughness: 0.96,
+    metalness: 0.02,
+    envMapIntensity: 0.1,
   });
 
   // === CRIMSON TEAM (w) ===
@@ -385,9 +389,11 @@ export function createDraculaMaterials(textures: BoardTextures): DraculaMaterial
   });
 
   const mawInnerMat = new THREE.MeshStandardMaterial({
-    color: 0x3b0006,
-    emissive: 0x1a0002,
-    roughness: 0.22,
+    color: 0xb0000e,
+    emissive: 0x6b0007,
+    emissiveIntensity: 0.88,
+    roughness: 0.26,
+    metalness: 0.04,
     side: THREE.DoubleSide,
   });
 

@@ -392,7 +392,7 @@ export function DraculaTitleOverlay({
       </div>
 
       {/* Single Flat Control Hint Line in Bottom Safe Margin */}
-      <div className="pointer-events-none text-center">
+      <div className="pointer-events-none text-center pl-14 sm:pl-0">
         <p className="inline-block text-xs md:text-sm tracking-wide text-[#c8b2b6] bg-[#0c080a]/80 px-4 py-1.5 rounded-full border border-[#3d1b22]">
           Arrastra para rotar · Rueda o 2 dedos para zoom · Clic en pieza y casilla para mover
         </p>

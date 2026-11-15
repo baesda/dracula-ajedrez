@@ -15,6 +15,7 @@ import type {
   TeamColor,
   TimeControlMinutes,
 } from './chess/types';
+import { BrightnessControl } from './components/BrightnessControl';
 import { DraculaTitleOverlay, type TwoPlayerStep } from './components/DraculaTitleOverlay';
 import { FallbackBoard2D } from './components/FallbackBoard2D';
 import { GameHud } from './components/GameHud';
@@ -23,6 +24,7 @@ import {
   joinP2PGuestRoom,
   type P2PSession,
 } from './multiplayer/p2pRoom';
+import { DEFAULT_BRIGHTNESS } from './three/brightness';
 import { DraculaChessScene } from './three/DraculaChessScene';
 
 export default function App() {
@@ -56,6 +58,8 @@ export default function App() {
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [isCaptureAnimating, setIsCaptureAnimating] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [brightness, setBrightness] = useState(DEFAULT_BRIGHTNESS);
+  const brightnessRef = useRef(DEFAULT_BRIGHTNESS);
   const [webglUnavailable, setWebglUnavailable] = useState(false);
   const [sceneRetryCount, setSceneRetryCount] = useState(0);
 
@@ -453,6 +457,7 @@ export default function App() {
       });
       sceneRef.current = scene;
       setWebglUnavailable(false);
+      scene.setBrightness(brightnessRef.current);
       scene.syncState(
         engineRef.current.getPieces(),
         engineRef.current.getSnapshot(),
@@ -898,6 +903,12 @@ export default function App() {
     [applyServerClock, attachRoomPushSocket, closeSocket, detectTransportMode],
   );
 
+  const handleChangeBrightness = useCallback((next: number) => {
+    brightnessRef.current = next;
+    setBrightness(next);
+    sceneRef.current?.setBrightness(next);
+  }, []);
+
   const handleToggleMute = useCallback(() => {
     setMuted((prev) => {
       const next = !prev;
@@ -1134,6 +1145,11 @@ export default function App() {
           statusBanner={statusBanner}
         />
       )}
+
+      <BrightnessControl
+        brightness={brightness}
+        onChangeBrightness={handleChangeBrightness}
+      />
     </main>
   );
 }

@@ -225,7 +225,7 @@ export function GameHud({
       </div>
 
       {/* Collapsible Bottom Control Dock */}
-      <div className="fixed bottom-4 left-1/2 -translate-x-1/2 flex flex-col items-center pointer-events-auto max-w-[94vw]">
+      <div className="fixed bottom-4 left-[calc(50%+26px)] sm:left-1/2 -translate-x-1/2 flex flex-col items-center pointer-events-auto max-w-[calc(100vw-88px)] sm:max-w-[94vw]">
         <button
           type="button"
           tabIndex={-1}

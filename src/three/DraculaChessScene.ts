@@ -17,6 +17,7 @@ import {
   computeMoveHeight,
   getQueenMagicOrbPalette,
 } from './animationConfig';
+import { computeLightingFromBrightness, DEFAULT_BRIGHTNESS } from './brightness';
 import { createDraculaMaterials, type DraculaMaterials } from './materials';
 import {
   buildDraculaPieceMesh,
@@ -174,6 +175,11 @@ export class DraculaChessScene {
 
   // Taller red asynchronous candle rigs
   private candleRigs: CandleRig[] = [];
+  private hemiLight: THREE.HemisphereLight | null = null;
+  private keyLight: THREE.DirectionalLight | null = null;
+  private rimLight: THREE.DirectionalLight | null = null;
+  private eerieSideLight: THREE.DirectionalLight | null = null;
+  private currentBrightness = DEFAULT_BRIGHTNESS;
 
   // Camera transition & subtle impact trauma shake
   private titleOrbitMode = true;
@@ -379,6 +385,7 @@ export class DraculaChessScene {
 
   private setupLighting(): void {
     const hemi = new THREE.HemisphereLight(0x424e7a, 0x1e0307, 0.34);
+    this.hemiLight = hemi;
     this.scene.add(hemi);
 
     const keyLight = new THREE.DirectionalLight(0xd9e3ff, 1.08);
@@ -394,15 +401,32 @@ export class DraculaChessScene {
     keyLight.shadow.camera.bottom = -d;
     keyLight.shadow.bias = -0.0005;
     keyLight.shadow.normalBias = 0.02;
+    this.keyLight = keyLight;
     this.scene.add(keyLight);
 
     const rimLight = new THREE.DirectionalLight(0xe60c28, 1.55);
     rimLight.position.set(-7, 4.5, -8);
+    this.rimLight = rimLight;
     this.scene.add(rimLight);
 
     const eerieSideLight = new THREE.DirectionalLight(0x0c8f4a, 0.85);
     eerieSideLight.position.set(8, 3.5, -6);
+    this.eerieSideLight = eerieSideLight;
     this.scene.add(eerieSideLight);
+
+    this.setBrightness(this.currentBrightness);
+  }
+
+  setBrightness(value: number): void {
+    const { exposure, environmentIntensity, lightMultiplier } = computeLightingFromBrightness(value);
+    this.currentBrightness = value;
+    this.renderer.toneMappingExposure = exposure;
+    this.scene.environmentIntensity = environmentIntensity;
+    if (this.hemiLight) this.hemiLight.intensity = 0.34 * lightMultiplier;
+    if (this.keyLight) this.keyLight.intensity = 1.08 * lightMultiplier;
+    if (this.rimLight) this.rimLight.intensity = 1.55 * lightMultiplier;
+    if (this.eerieSideLight) this.eerieSideLight.intensity = 0.85 * lightMultiplier;
+    this.requestRender();
   }
 
   private buildGothicEnvironment(): void {
@@ -739,6 +763,8 @@ export class DraculaChessScene {
     vyMin = 1.6,
     vyMax = 4.2,
     scaleBase = 0.85,
+    biasVx = 0,
+    biasVz = 0,
   ): void {
     let spawned = 0;
     for (let i = 0; i < BLOOD_PARTICLE_COUNT && spawned < count; i++) {
@@ -750,9 +776,9 @@ export class DraculaChessScene {
         p.x = worldX + (Math.random() - 0.5) * 0.14;
         p.y = worldY + (Math.random() - 0.5) * 0.12;
         p.z = worldZ + (Math.random() - 0.5) * 0.14;
-        p.vx = Math.cos(angle) * speed;
+        p.vx = Math.cos(angle) * speed + biasVx;
         p.vy = vyMin + Math.random() * (vyMax - vyMin);
-        p.vz = Math.sin(angle) * speed;
+        p.vz = Math.sin(angle) * speed + biasVz;
         p.life = 0;
         p.maxLife = 0.75 + Math.random() * 0.65;
         p.scale = scaleBase * (0.65 + Math.random() * 0.85);
@@ -1580,15 +1606,15 @@ export class DraculaChessScene {
         const u = (t - 0.75) / 1.3;
         const ease = u * u * (3 - 2 * u);
         if (rig.pawnUpperHeadPivot) {
-          rig.pawnUpperHeadPivot.rotation.x = -0.92 * ease;
-          rig.pawnUpperHeadPivot.scale.setScalar(1 + 0.75 * ease);
+          rig.pawnUpperHeadPivot.rotation.x = -0.98 * ease;
+          rig.pawnUpperHeadPivot.scale.setScalar(1 + 0.72 * ease);
         }
         if (rig.pawnLowerJawPivot) {
-          rig.pawnLowerJawPivot.rotation.x = 1.38 * ease;
-          rig.pawnLowerJawPivot.scale.set(1 + 1.25 * ease, 1 + 0.95 * ease, 1 + 1.1 * ease);
+          rig.pawnLowerJawPivot.rotation.x = 1.42 * ease;
+          rig.pawnLowerJawPivot.scale.set(1 + 1.18 * ease, 1 + 0.9 * ease, 1 + 1.05 * ease);
         }
         if (rig.pawnMawMesh) {
-          rig.pawnMawMesh.scale.set(0.01 + 1.9 * ease, 0.01 + 1.72 * ease, 0.01 + 1.8 * ease);
+          rig.pawnMawMesh.scale.set(0.01 + 1.32 * ease, 0.01 + 1.18 * ease, 0.01 + 1.02 * ease);
         }
         const armScale = Math.max(0.001, 1 - ease);
         if (rig.pawnLeftArmPivot) rig.pawnLeftArmPivot.scale.setScalar(armScale);
@@ -1604,26 +1630,33 @@ export class DraculaChessScene {
         );
         rig.visualGroup.rotation.y = attackAngleY;
       } else if (t < 4.55) {
-        // BITES DOWN on the attacked target -> blood bursts out ONLY now as jaws chomp & devour!
+        // BITES DOWN on the attacked target -> blood bubbles burst out of the pawn's red open mouth!
         const eatU = (t - 2.5) / 2.05;
         const chompWave = Math.sin((t - 2.5) * Math.PI * 3.4);
+        attackerGroup.position.set(biteX, BOARD_TOP_Y, biteZ);
+        if (rig.pawnUpperHeadPivot) {
+          rig.pawnUpperHeadPivot.rotation.x = -0.58 + chompWave * 0.36;
+          rig.pawnUpperHeadPivot.scale.setScalar(1.72);
+        }
+        if (rig.pawnLowerJawPivot) {
+          rig.pawnLowerJawPivot.rotation.x = 0.82 - chompWave * 0.56;
+          rig.pawnLowerJawPivot.scale.set(2.18, 1.9, 2.05);
+        }
+        if (rig.pawnMawMesh) {
+          rig.pawnMawMesh.scale.set(1.32, 1.18, 1.02);
+        }
+        attackerGroup.updateMatrixWorld(true);
+        if (rig.pawnMouthAnchor) {
+          rig.pawnMouthAnchor.getWorldPosition(_v3);
+        } else {
+          _v3.set(biteX + dirX * 0.2, 0.62, biteZ + dirZ * 0.2);
+        }
         once('pawnBiteBlood', () => {
           bloodPool.visible = true;
           this.trauma = Math.min(1, this.trauma + 0.6);
-          this.spawnBloodBurst(victimX, 0.58, victimZ, 38, 1.5, 4.0, 1.8, 4.4, 1.05);
+          this.spawnBloodBurst(_v3.x, _v3.y, _v3.z, 32, 0.9, 3.1, 1.5, 4.1, 1.05, dirX * 1.1, dirZ * 1.1);
+          this.spawnBloodBurst(victimX, 0.55, victimZ, 12, 0.9, 2.6, 1.2, 3.2, 0.95);
         });
-        attackerGroup.position.set(biteX, BOARD_TOP_Y, biteZ);
-        if (rig.pawnUpperHeadPivot) {
-          rig.pawnUpperHeadPivot.rotation.x = -0.46 + chompWave * 0.38;
-          rig.pawnUpperHeadPivot.scale.setScalar(1.75);
-        }
-        if (rig.pawnLowerJawPivot) {
-          rig.pawnLowerJawPivot.rotation.x = 0.65 - chompWave * 0.62;
-          rig.pawnLowerJawPivot.scale.set(2.25, 1.95, 2.1);
-        }
-        if (rig.pawnMawMesh) {
-          rig.pawnMawMesh.scale.set(1.9, 1.72, 1.8);
-        }
         const mawWorldX = biteX + dirX * 0.14;
         const mawWorldZ = biteZ + dirZ * 0.14;
         victimGroup.position.set(
@@ -1636,8 +1669,12 @@ export class DraculaChessScene {
         victimGroup.scale.setScalar(swallowScale);
         if (eatU > 0.94) victimGroup.visible = false;
 
-        if (Math.random() < 0.62) {
-          this.spawnBloodBurst(victimX, 0.56, victimZ, 3, 1.1, 3.0, 1.2, 3.4, 0.95);
+        const chompBeat = Math.floor((t - 2.5) / 0.28);
+        once(`pawnChomp${chompBeat}`, () => {
+          this.spawnBloodBurst(_v3.x, _v3.y, _v3.z, 8, 0.75, 2.4, 1.1, 3.3, 0.98, dirX * 0.9, dirZ * 0.9);
+        });
+        if (Math.random() < Math.min(0.88, dt * 36)) {
+          this.spawnBloodBurst(_v3.x, _v3.y, _v3.z, 3, 0.7, 2.2, 1.0, 3.0, 0.92, dirX * 0.85, dirZ * 0.85);
         }
         bloodPool.scale.setScalar(0.15 + eatU * 1.15);
         if (eatU > 0.45) once('chomp2', () => { this.trauma = Math.min(1, this.trauma + 0.45); });
@@ -1646,14 +1683,14 @@ export class DraculaChessScene {
         const u = (t - 4.55) / 0.7;
         if (rig.pawnUpperHeadPivot) {
           rig.pawnUpperHeadPivot.rotation.x = THREE.MathUtils.lerp(-0.4, 0, u);
-          rig.pawnUpperHeadPivot.scale.setScalar(THREE.MathUtils.lerp(1.75, 1, u));
+          rig.pawnUpperHeadPivot.scale.setScalar(THREE.MathUtils.lerp(1.72, 1, u));
         }
         if (rig.pawnLowerJawPivot) {
           rig.pawnLowerJawPivot.rotation.x = THREE.MathUtils.lerp(0.55, 0, u);
           rig.pawnLowerJawPivot.scale.setScalar(THREE.MathUtils.lerp(2.0, 1, u));
         }
         if (rig.pawnMawMesh) {
-          rig.pawnMawMesh.scale.setScalar(Math.max(0.001, THREE.MathUtils.lerp(1.8, 0.001, u)));
+          rig.pawnMawMesh.scale.setScalar(Math.max(0.001, THREE.MathUtils.lerp(1.25, 0.001, u)));
         }
         const armBack = Math.max(0.001, u);
         if (rig.pawnLeftArmPivot) {
